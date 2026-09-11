@@ -17,12 +17,12 @@ st.set_page_config(
 # ============================================
 TAXA_BONIFICACAO = 0.01  # 1% de retorno
 DIAS_VALIDADE = 365      # 1 ano de validade
+COLUNAS_ESPERADAS = ['cliente', 'valor', 'data']
 
 # ============================================
 # INICIALIZAÇÃO DO ESTADO
 # ============================================
 def inicializar_estado():
-    """Inicializa o estado da sessão se não existir"""
     if 'dados_vendas' not in st.session_state:
         st.session_state.dados_vendas = None
     if 'historico_pontos' not in st.session_state:
@@ -35,87 +35,195 @@ inicializar_estado()
 # ============================================
 def calcular_pontos(valor_venda):
     """Calcula pontos baseado no valor da venda (1%)"""
-    return round(valor_venda * TAXA_BONIFICACAO, 2)
+    return round(float(valor_venda) * TAXA_BONIFICACAO, 2)
 
 def calcular_validade(data_venda):
-    """Calcula data de validade dos pontos (1 ano)"""
+    """Calcula data de validade dos pontos (1 ano após a venda)"""
     if isinstance(data_venda, str):
-        data_venda = datetime.strptime(data_venda, '%Y-%m-%d')
+        data_venda = pd.to_datetime(data_venda)
     return data_venda + timedelta(days=DIAS_VALIDADE)
 
+def normalizar_cliente(nome):
+    """Normaliza nome do cliente para evitar duplicatas"""
+    if pd.isna(nome):
+        return ""
+    # Remove espaços extras e padroniza capitalização
+    return " ".join(str(nome).strip().title().split())
+
+def parse_valor(valor):
+    """
+    Converte valor para float, aceitando:
+    - Ponto decimal: 1500.00
+    - Vírgula decimal: 1500,00
+    - Com símbolo R$: R$ 1.500,00
+    """
+    if pd.isna(valor):
+        raise ValueError("Valor vazio")
+    
+    if isinstance(valor, (int, float)):
+        return float(valor)
+    
+    # Remove R$, espaços
+    valor_str = str(valor).replace("R$", "").replace(" ", "").strip()
+    
+    # Se tem vírgula E ponto: assume ponto como milhar (padrão BR)
+    if "," in valor_str and "." in valor_str:
+        valor_str = valor_str.replace(".", "").replace(",", ".")
+    # Se tem apenas vírgula: assume vírgula como decimal
+    elif "," in valor_str:
+        valor_str = valor_str.replace(",", ".")
+    
+    return float(valor_str)
+
+def parse_data(data):
+    """Tenta converter data em vários formatos comuns"""
+    if pd.isna(data) or str(data).strip() == "":
+        raise ValueError("Data vazia")
+    
+    if isinstance(data, datetime):
+        return data
+    
+    formatos = ['%Y-%m-%d', '%d/%m/%Y', '%d-%m-%Y', '%Y/%m/%d']
+    data_str = str(data).strip()
+    
+    for fmt in formatos:
+        try:
+            return datetime.strptime(data_str, fmt)
+        except ValueError:
+            continue
+    
+    # Última tentativa: deixa o pandas tentar
+    return pd.to_datetime(data_str)
+
 def processar_csv(arquivo):
-    """Processa o arquivo CSV de vendas"""
+    """
+    Processa o arquivo CSV de vendas com validação completa.
+    Formato esperado: cliente, valor, data
+    """
     try:
+        # Ler CSV
         df = pd.read_csv(arquivo)
         
-        # Verificar colunas necessárias
-        colunas_necessarias = ['cliente', 'valor']
-        colunas_encontradas = [col.lower() for col in df.columns]
+        # Normalizar nomes de colunas (minúsculas, sem espaços)
+        df.columns = [str(c).strip().lower() for c in df.columns]
         
-        # Mapear colunas (aceita variações)
-        mapeamento = {}
-        for col in df.columns:
-            col_lower = col.lower()
-            if 'cliente' in col_lower or 'nome' in col_lower:
-                mapeamento[col] = 'cliente'
-            elif 'valor' in col_lower or 'total' in col_lower or 'venda' in col_lower:
-                mapeamento[col] = 'valor'
-            elif 'data' in col_lower:
-                mapeamento[col] = 'data'
-        
-        df = df.rename(columns=mapeamento)
-        
-        # Verificar se temos as colunas essenciais
-        if 'cliente' not in df.columns or 'valor' not in df.columns:
-            st.error("❌ O arquivo precisa ter colunas de 'cliente' e 'valor'")
+        # Validar colunas obrigatórias
+        colunas_faltantes = [c for c in COLUNAS_ESPERADAS if c not in df.columns]
+        if colunas_faltantes:
+            st.error(
+                f"❌ Colunas obrigatórias faltando: **{', '.join(colunas_faltantes)}**\n\n"
+                f"Colunas encontradas: {', '.join(df.columns.tolist())}\n\n"
+                f"Formato esperado: **cliente, valor, data**"
+            )
             return None
         
-        # Adicionar data se não existir
-        if 'data' not in df.columns:
-            df['data'] = datetime.now().strftime('%Y-%m-%d')
+        # Validar se há dados
+        if df.empty:
+            st.error("❌ O arquivo CSV está vazio.")
+            return None
         
-        # Calcular pontos
-        df['pontos'] = df['valor'].apply(calcular_pontos)
-        df['validade'] = df['data'].apply(calcular_validade)
-        df['data_processamento'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+        # Processar linha por linha com tratamento de erros
+        registros_validos = []
+        erros = []
         
-        return df
+        for idx, row in df.iterrows():
+            try:
+                cliente = normalizar_cliente(row['cliente'])
+                if not cliente:
+                    raise ValueError("Nome do cliente vazio")
+                
+                valor = parse_valor(row['valor'])
+                if valor < 0:
+                    raise ValueError("Valor negativo")
+                
+                data = parse_data(row['data'])
+                
+                registros_validos.append({
+                    'cliente': cliente,
+                    'valor': valor,
+                    'data': data
+                })
+            except Exception as e:
+                erros.append(f"Linha {idx + 2}: {str(e)}")
+        
+        # Reportar erros
+        if erros:
+            with st.expander(f"⚠️ {len(erros)} linha(s) com erro (ignoradas)"):
+                for erro in erros:
+                    st.warning(erro)
+        
+        if not registros_validos:
+            st.error("❌ Nenhuma linha válida encontrada no arquivo.")
+            return None
+        
+        # Criar DataFrame limpo
+        df_limpo = pd.DataFrame(registros_validos)
+        
+        # Calcular pontos e validade
+        df_limpo['pontos'] = df_limpo['valor'].apply(calcular_pontos)
+        df_limpo['validade'] = df_limpo['data'].apply(calcular_validade)
+        df_limpo['data'] = df_limpo['data'].dt.strftime('%Y-%m-%d')
+        df_limpo['validade'] = df_limpo['validade'].dt.strftime('%Y-%m-%d')
+        df_limpo['data_processamento'] = datetime.now().strftime('%Y-%m-%d %H:%M')
+        
+        # Ordenar por data
+        df_limpo = df_limpo.sort_values('data').reset_index(drop=True)
+        
+        return df_limpo
     
+    except pd.errors.EmptyDataError:
+        st.error("❌ O arquivo está vazio ou não é um CSV válido.")
+        return None
     except Exception as e:
         st.error(f"❌ Erro ao processar arquivo: {str(e)}")
         return None
 
 def consolidar_pontos_por_cliente(df):
-    """Agrupa pontos por cliente"""
+    """Agrupa pontos por cliente (somando múltiplas compras)"""
     if df is None or df.empty:
         return pd.DataFrame()
     
     consolidado = df.groupby('cliente').agg({
         'valor': 'sum',
         'pontos': 'sum',
-        'data': 'max',  # Última compra
-        'validade': 'max'  # Validade mais distante
+        'data': 'max',
+        'validade': 'max'
     }).reset_index()
     
-    consolidado.columns = ['Cliente', 'Total Gasto (R$)', 'Pontos Disponíveis', 'Última Compra', 'Validade']
-    consolidado['Total Gasto (R$)'] = consolidado['Total Gasto (R$)'].apply(lambda x: f"R$ {x:,.2f}")
-    consolidado['Pontos Disponíveis'] = consolidado['Pontos Disponíveis'].apply(lambda x: f"R$ {x:,.2f}")
+    consolidado.columns = [
+        'Cliente', 'Total Gasto (R$)', 'Pontos Disponíveis (R$)',
+        'Última Compra', 'Validade'
+    ]
     
-    return consolidado.sort_values('Cliente')
+    # Formatar para exibição
+    consolidado_display = consolidado.copy()
+    consolidado_display['Total Gasto (R$)'] = consolidado_display['Total Gasto (R$)'].apply(
+        lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    )
+    consolidado_display['Pontos Disponíveis (R$)'] = consolidado_display['Pontos Disponíveis (R$)'].apply(
+        lambda x: f"R$ {x:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+    )
+    
+    return consolidado, consolidado_display
 
 def verificar_pontos_expirados(df):
     """Verifica pontos expirados"""
     if df is None or df.empty:
         return pd.DataFrame()
     
-    hoje = datetime.now()
-    df['validade_dt'] = pd.to_datetime(df['validade'])
-    expirados = df[df['validade_dt'] < hoje].copy()
+    hoje = pd.Timestamp.now().normalize()
+    df_temp = df.copy()
+    df_temp['validade_dt'] = pd.to_datetime(df_temp['validade'])
+    expirados = df_temp[df_temp['validade_dt'] < hoje].copy()
     
     if not expirados.empty:
         expirados['dias_expirado'] = (hoje - expirados['validade_dt']).dt.days
     
     return expirados
+
+def formatar_moeda(valor):
+    """Formata número como moeda brasileira"""
+    return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
 
 # ============================================
 # INTERFACE PRINCIPAL
@@ -138,6 +246,10 @@ with st.sidebar:
         f"• Recebe R$ 10,00 em pontos (1%)\n"
         f"• Validade: {DIAS_VALIDADE} dias"
     )
+    
+    # Indicador de dados carregados
+    if st.session_state.dados_vendas is not None:
+        st.success(f"✅ {len(st.session_state.dados_vendas)} registros carregados")
 
 # ============================================
 # PÁGINA: UPLOAD DE VENDAS
@@ -147,9 +259,11 @@ if opcao == "📤 Upload de Vendas":
     
     st.markdown("""
     **Formato esperado do CSV:**
-    - Coluna `cliente` ou `nome`: Nome do cliente
-    - Coluna `valor` ou `total`: Valor da venda
-    - Coluna `data` (opcional): Data da venda (YYYY-MM-DD)
+    
+    | cliente | valor | data |
+    |---------|-------|------|
+    | João Silva | 1500.00 | 2025-01-15 |
+    | Maria Santos | 2300.50 | 2025-01-20 |
     """)
     
     # Exemplo de CSV para download
@@ -159,19 +273,21 @@ Maria Santos,2300.50,2025-01-20
 Pedro Oliveira,850.00,2025-01-25
 Ana Costa,3200.00,2025-02-01"""
     
-    st.download_button(
-        label="📥 Baixar modelo de CSV",
-        data=exemplo_csv,
-        file_name="modelo_vendas.csv",
-        mime="text/csv"
-    )
+    col1, col2 = st.columns([1, 3])
+    with col1:
+        st.download_button(
+            label="📥 Baixar modelo",
+            data=exemplo_csv,
+            file_name="modelo_vendas.csv",
+            mime="text/csv"
+        )
     
     st.markdown("---")
     
     arquivo = st.file_uploader(
         "Selecione o arquivo CSV de vendas",
         type=['csv'],
-        help="Arquivo gerado pelo seu sistema de vendas"
+        help="O arquivo deve conter as colunas: cliente, valor, data"
     )
     
     if arquivo is not None:
@@ -183,25 +299,29 @@ Ana Costa,3200.00,2025-02-01"""
             # Adicionar ao histórico
             st.session_state.historico_pontos.append({
                 'data_upload': datetime.now().strftime('%Y-%m-%d %H:%M'),
+                'arquivo': arquivo.name,
                 'registros': len(df),
                 'total_vendas': df['valor'].sum(),
                 'total_pontos': df['pontos'].sum()
             })
             
-            st.success(f"✅ Arquivo processado com sucesso! {len(df)} registros encontrados.")
+            st.success(f"✅ Arquivo processado com sucesso! {len(df)} registros válidos.")
             
             # Preview dos dados
             st.subheader("📋 Preview dos Dados Processados")
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(df, use_container_width=True, hide_index=True)
             
             # Métricas
-            col1, col2, col3 = st.columns(3)
+            st.markdown("### 📊 Resumo")
+            col1, col2, col3, col4 = st.columns(4)
             with col1:
-                st.metric("Total de Vendas", f"R$ {df['valor'].sum():,.2f}")
+                st.metric("Total de Vendas", formatar_moeda(df['valor'].sum()))
             with col2:
-                st.metric("Total de Pontos Gerados", f"R$ {df['pontos'].sum():,.2f}")
+                st.metric("Total de Pontos", formatar_moeda(df['pontos'].sum()))
             with col3:
                 st.metric("Clientes Únicos", df['cliente'].nunique())
+            with col4:
+                st.metric("Ticket Médio", formatar_moeda(df['valor'].mean()))
 
 # ============================================
 # PÁGINA: DASHBOARD
@@ -216,31 +336,14 @@ elif opcao == "📊 Dashboard":
         
         # Métricas principais
         col1, col2, col3, col4 = st.columns(4)
-        
         with col1:
-            st.metric(
-                "💰 Total de Vendas",
-                f"R$ {df['valor'].sum():,.2f}"
-            )
-        
+            st.metric("💰 Total de Vendas", formatar_moeda(df['valor'].sum()))
         with col2:
-            st.metric(
-                "🎁 Total de Pontos",
-                f"R$ {df['pontos'].sum():,.2f}"
-            )
-        
+            st.metric("🎁 Total de Pontos", formatar_moeda(df['pontos'].sum()))
         with col3:
-            st.metric(
-                "👥 Total de Clientes",
-                df['cliente'].nunique()
-            )
-        
+            st.metric("👥 Total de Clientes", df['cliente'].nunique())
         with col4:
-            ticket_medio = df['valor'].mean()
-            st.metric(
-                "📈 Ticket Médio",
-                f"R$ {ticket_medio:,.2f}"
-            )
+            st.metric("📈 Ticket Médio", formatar_moeda(df['valor'].mean()))
         
         st.markdown("---")
         
@@ -261,14 +364,22 @@ elif opcao == "📊 Dashboard":
         
         st.markdown("---")
         
+        # Vendas por data (se houver múltiplas datas)
+        if df['data'].nunique() > 1:
+            st.subheader("📅 Evolução de Vendas por Data")
+            vendas_data = df.groupby('data')['valor'].sum().reset_index()
+            vendas_data.columns = ['Data', 'Valor']
+            st.line_chart(vendas_data.set_index('Data'))
+        
         # Histórico de uploads
         if st.session_state.historico_pontos:
+            st.markdown("---")
             st.subheader("📅 Histórico de Uploads")
             historico_df = pd.DataFrame(st.session_state.historico_pontos)
-            historico_df.columns = ['Data Upload', 'Registros', 'Total Vendas', 'Total Pontos']
-            historico_df['Total Vendas'] = historico_df['Total Vendas'].apply(lambda x: f"R$ {x:,.2f}")
-            historico_df['Total Pontos'] = historico_df['Total Pontos'].apply(lambda x: f"R$ {x:,.2f}")
-            st.dataframe(historico_df, use_container_width=True)
+            historico_df['total_vendas'] = historico_df['total_vendas'].apply(formatar_moeda)
+            historico_df['total_pontos'] = historico_df['total_pontos'].apply(formatar_moeda)
+            historico_df.columns = ['Data Upload', 'Arquivo', 'Registros', 'Total Vendas', 'Total Pontos']
+            st.dataframe(historico_df, use_container_width=True, hide_index=True)
 
 # ============================================
 # PÁGINA: CLIENTES
@@ -280,28 +391,40 @@ elif opcao == "👥 Clientes":
         st.warning("⚠️ Nenhum dado carregado. Faça o upload do arquivo CSV primeiro.")
     else:
         df = st.session_state.dados_vendas
-        consolidado = consolidar_pontos_por_cliente(df)
+        consolidado, consolidado_display = consolidar_pontos_por_cliente(df)
         
         # Filtro de busca
         busca = st.text_input("🔍 Buscar cliente:", "")
         
         if busca:
-            consolidado = consolidado[
-                consolidado['Cliente'].str.contains(busca, case=False, na=False)
-            ]
+            mask = consolidado_display['Cliente'].str.contains(busca, case=False, na=False)
+            consolidado_display_filtrado = consolidado_display[mask]
+        else:
+            consolidado_display_filtrado = consolidado_display
         
-        st.dataframe(consolidado, use_container_width=True, hide_index=True)
+        st.dataframe(consolidado_display_filtrado, use_container_width=True, hide_index=True)
         
         # Resumo
         st.markdown("---")
         st.subheader("📊 Resumo")
-        
-        col1, col2 = st.columns(2)
+        col1, col2, col3 = st.columns(3)
         with col1:
-            st.info(f"**Total de clientes:** {len(consolidado)}")
+            st.info(f"**Clientes listados:** {len(consolidado_display_filtrado)}")
         with col2:
-            total_pontos = df['pontos'].sum()
-            st.info(f"**Total de pontos distribuídos:** R$ {total_pontos:,.2f}")
+            total_pontos = consolidado['Pontos Disponíveis (R$)'].sum()
+            st.info(f"**Total de pontos:** {formatar_moeda(total_pontos)}")
+        with col3:
+            total_gasto = consolidado['Total Gasto (R$)'].sum()
+            st.info(f"**Total gasto:** {formatar_moeda(total_gasto)}")
+        
+        # Botão de download
+        csv_export = consolidado.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 Exportar lista de clientes (CSV)",
+            data=csv_export,
+            file_name=f"clientes_pontos_{datetime.now().strftime('%Y%m%d')}.csv",
+            mime="text/csv"
+        )
 
 # ============================================
 # PÁGINA: PONTOS EXPIRADOS
@@ -320,18 +443,16 @@ elif opcao == "⚠️ Pontos Expirados":
         else:
             st.error(f"⚠️ {len(expirados)} registro(s) com pontos expirados")
             
-            # Mostrar tabela de expirados
-            expirados_display = expirados[['cliente', 'valor', 'pontos', 'data', 'validade']].copy()
-            expirados_display.columns = ['Cliente', 'Valor', 'Pontos', 'Data Venda', 'Validade']
-            expirados_display['Valor'] = expirados_display['Valor'].apply(lambda x: f"R$ {x:,.2f}")
-            expirados_display['Pontos'] = expirados_display['Pontos'].apply(lambda x: f"R$ {x:,.2f}")
+            expirados_display = expirados[['cliente', 'valor', 'pontos', 'data', 'validade', 'dias_expirado']].copy()
+            expirados_display.columns = ['Cliente', 'Valor', 'Pontos', 'Data Venda', 'Validade', 'Dias Expirado']
+            expirados_display['Valor'] = expirados_display['Valor'].apply(formatar_moeda)
+            expirados_display['Pontos'] = expirados_display['Pontos'].apply(formatar_moeda)
             
             st.dataframe(expirados_display, use_container_width=True, hide_index=True)
             
-            # Resumo de perdas
             st.markdown("---")
             total_expirado = expirados['pontos'].sum()
-            st.metric("💸 Total de Pontos Expirados", f"R$ {total_expirado:,.2f}")
+            st.metric("💸 Total de Pontos Expirados", formatar_moeda(total_expirado))
 
 # ============================================
 # PÁGINA: INFORMAÇÕES
@@ -356,25 +477,5 @@ elif opcao == "ℹ️ Informações":
     | R$ 5.000,00 | R$ 50,00       |
     
     ### Formato do Arquivo CSV
-    O arquivo deve conter as seguintes colunas:
-    - `cliente` ou `nome`: Nome do cliente
-    - `valor` ou `total`: Valor da compra
-    - `data` (opcional): Data da venda no formato YYYY-MM-DD
+    O arquivo deve conter exatamente estas colunas:
     
-    ### Fluxo de Uso
-    1. Faça upload do arquivo CSV mensal
-    2. O sistema calcula automaticamente os pontos
-    3. Consulte o dashboard para visualizar métricas
-    4. Acompanhe a validade dos pontos na aba de clientes
-    """)
-
-# ============================================
-# RODAPÉ
-# ============================================
-st.markdown("---")
-st.markdown(
-    "<div style='text-align: center; color: gray;'>"
-    "Sistema de Bonificação v1.0 | Desenvolvido com Streamlit"
-    "</div>",
-    unsafe_allow_html=True
-)
