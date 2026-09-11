@@ -384,9 +384,6 @@ def calcular_saldo_cliente(cliente):
         'total_gerado': pontos_ativos + pontos_expirados
     }
 
-def saldo_disponivel_rapido(cliente):
-    return calcular_saldo_cliente(cliente)['saldo_disponivel']
-
 def listar_clientes():
     with get_conn() as conn:
         df = pd.read_sql_query(
@@ -457,7 +454,7 @@ def registrar_resgate(cliente, produto_id, observacao=""):
     )
 
 # ============================================
-# CONSILIACAO PARA EXIBICAO
+# CONSOLIDACAO PARA EXIBICAO
 # ============================================
 def consolidar_clientes():
     """Retorna DataFrame com resumo por cliente (disponivel, expirado, resgatado)."""
@@ -510,7 +507,7 @@ with st.sidebar:
         f"Cliente gasta R$ 1.000,00\n"
         f"Recebe R$ 10,00 em pontos (1%)\n"
         f"Validade: {DIAS_VALIDADE} dias\n"
-        f"Dados salvos em: `{DB_PATH}`"
+        f"Banco local: `{DB_PATH}`"
     )
 
     with get_conn() as conn:
@@ -571,9 +568,9 @@ if opcao == "📤 Upload de Vendas":
                 with col3:
                     st.metric("Duplicadas", duplicados)
                 with col4:
-                    st.metric("Total no Banco", pd.read_sql_query(
-                        "SELECT COUNT(*) as n FROM vendas", get_conn()
-                    )['n'][0])
+                    with get_conn() as conn:
+                        total = pd.read_sql_query("SELECT COUNT(*) as n FROM vendas", conn)['n'][0]
+                    st.metric("Total no Banco", total)
 
                 st.markdown("### 📋 Preview das Novas Vendas")
                 preview = df_novo.copy()
@@ -804,8 +801,7 @@ elif opcao == "🎁 Resgatar Pontos":
                                     "Resgatar", key=f"resg_{p['id']}",
                                     disabled=not disponivel
                                 ):
-                                    obs = st.session_state.get(f"obs_{p['id']}", "")
-                                    ok, msg = registrar_resgate(cliente, int(p['id']), obs)
+                                    ok, msg = registrar_resgate(cliente, int(p['id']))
                                     if ok:
                                         st.success(msg)
                                         st.rerun()
@@ -1048,30 +1044,30 @@ elif opcao == "ℹ️ Informacoes":
         f"- **Validade:** {DIAS_VALIDADE} dias por venda (individual)\n"
         f"- **Resgate:** troca de pontos por produtos cadastrados\n"
         f"- **Debito automatico:** saldo = ativos + ajustes - resgatados\n"
-        f"- **Banco de dados:** `{DB_PATH}` (persistente)"
+        f"- **Banco de dados:** `{DB_PATH}` (arquivo local SQLite)"
     )
 
-    st.markdown("### Persistencia Online")
+    st.markdown("### Sobre o Banco de Dados Local")
     st.markdown(
-        "O sistema usa **SQLite** para persistir os dados. Para usar online:\n"
-        "- **Local/VPS:** funciona direto (arquivo `bonificacao.db`)\n"
-        "- **Render/Railway:** monte um volume persistente em `/data` e defina "
-        "a variavel de ambiente `DB_PATH=/data/bonificacao.db`\n"
-        "- **Streamlit Cloud:** use **Supabase** (troque `sqlite3` por `psycopg2`)\n"
-        "- **Google Sheets:** alternativa via `gspread`"
+        "O sistema usa **SQLite**, um banco de dados local baseado em arquivo:\n"
+        "- **Não precisa de servidor** — funciona sozinho\n"
+        "- **Zero configuração** — o arquivo `bonificacao.db` é criado automaticamente\n"
+        "- **Portátil** — basta copiar o arquivo `.db` para fazer backup\n"
+        "- **Compatível com Python** — já vem incluso na biblioteca padrão\n\n"
+        "**Backup:** copie o arquivo `bonificacao.db` para um local seguro regularmente."
     )
 
     st.markdown("### Abas do Sistema")
     st.markdown(
         "- **📤 Upload:** processa CSV e acumula no banco\n"
-        "- **📊 Dashboard:** metricas gerais\n"
+        "- **📊 Dashboard:** métricas gerais\n"
         "- **👥 Clientes:** saldo por cliente + detalhe\n"
         "- **🎁 Resgatar Pontos:** interface de resgate\n"
         "- **🛒 Gerenciar Produtos:** CRUD de produtos\n"
-        "- **📜 Historico de Resgates:** auditoria\n"
-        "- **⚙️ Ajustes Manuais:** creditos/debitos\n"
+        "- **📜 Histórico de Resgates:** auditoria\n"
+        "- **⚙️ Ajustes Manuais:** créditos/débitos\n"
         "- **📅 A Expirar:** pontos vencendo em 30 dias\n"
-        "- **⚠️ Pontos Expirados:** pontos ja vencidos"
+        "- **⚠️ Pontos Expirados:** pontos já vencidos"
     )
 
 # ============================================
@@ -1080,7 +1076,7 @@ elif opcao == "ℹ️ Informacoes":
 st.markdown("---")
 st.markdown(
     "<div style='text-align: center; color: gray;'>"
-    "Sistema de Bonificacao v3.0 | Desenvolvido com Streamlit + SQLite"
+    "Sistema de Bonificacao v3.0 | Streamlit + SQLite (banco local)"
     "</div>",
     unsafe_allow_html=True
 )
